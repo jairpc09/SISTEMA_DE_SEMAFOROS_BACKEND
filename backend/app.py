@@ -1,4 +1,5 @@
 import os
+import secrets
 from enum import Enum
 from hmac import compare_digest
 from time import monotonic
@@ -12,6 +13,7 @@ Mode = Literal["manual", "automatic"]
 GREEN_SECONDS = 4
 YELLOW_SECONDS = 1
 ALL_RED_SECONDS = 1
+ADMIN_TOKEN_TTL_SECONDS = 12 * 60 * 60
 
 
 class Color(str, Enum):
@@ -26,6 +28,10 @@ class ColorUpdate(BaseModel):
 
 class ModeUpdate(BaseModel):
     mode: Mode
+
+
+class AdminLogin(BaseModel):
+    password: str
 
 
 class SensorReport(BaseModel):
@@ -46,7 +52,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=frontend_origins,
     allow_methods=["GET", "POST", "PUT"],
-    allow_headers=["Content-Type", "X-Device-Token"],
+    allow_headers=["Authorization", "Content-Type", "X-Device-Token"],
 )
 
 semaphore_state: dict[str, Color] = {"1": Color.red, "2": Color.red}
@@ -55,6 +61,24 @@ phase = "manual"
 phase_started_at = monotonic()
 last_green: str | None = None
 sensor_detections = {"1": False, "2": False}
+admin_tokens: dict[str, float] = {}
+
+
+def require_admin_token(authorization: str | None) -> None:
+    if authorization is None or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Se requiere iniciar sesión como administrador",
+        )
+
+    token = authorization.removeprefix("Bearer ")
+    expires_at = admin_tokens.get(token)
+    if expires_at is None or expires_at <= monotonic():
+        admin_tokens.pop(token, None)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Sesión de administrador inválida o vencida",
+        )
 
 
 def require_device_token(token: str | None) -> None:
@@ -156,10 +180,40 @@ def read_state() -> dict[str, object]:
     return state_snapshot()
 
 
+@app.post("/api/admin/login")
+def admin_login(login: AdminLogin) -> dict[str, str]:
+    expected = os.getenv("SEMAPHORE_ADMIN_PASSWORD")
+    if not expected:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="El backend no tiene configurado SEMAPHORE_ADMIN_PASSWORD",
+        )
+    if not compare_digest(login.password, expected):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Contraseña de administrador incorrecta",
+        )
+
+    now = monotonic()
+    expired_tokens = [
+        token for token, expires_at in admin_tokens.items() if expires_at <= now
+    ]
+    for token in expired_tokens:
+        del admin_tokens[token]
+
+    token = secrets.token_urlsafe(32)
+    admin_tokens[token] = now + ADMIN_TOKEN_TTL_SECONDS
+    return {"token": token}
+
+
 @app.put("/api/mode")
-def update_mode(update: ModeUpdate) -> dict[str, object]:
+def update_mode(
+    update: ModeUpdate,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
     global operating_mode, phase, phase_started_at, last_green
 
+    require_admin_token(authorization)
     if update.mode == operating_mode:
         return state_snapshot()
 
@@ -176,7 +230,12 @@ def update_mode(update: ModeUpdate) -> dict[str, object]:
 
 
 @app.put("/api/semaphores/{semaphore_id}")
-def update_semaphore(semaphore_id: str, update: ColorUpdate) -> dict[str, str]:
+def update_semaphore(
+    semaphore_id: str,
+    update: ColorUpdate,
+    authorization: str | None = Header(default=None),
+) -> dict[str, str]:
+    require_admin_token(authorization)
     if semaphore_id not in semaphore_state:
         raise HTTPException(status_code=404, detail="Semáforo no encontrado")
     if operating_mode != "manual":
