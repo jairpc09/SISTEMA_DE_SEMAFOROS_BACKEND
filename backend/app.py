@@ -70,6 +70,7 @@ phase = "manual"
 phase_started_at = monotonic()
 last_green: str | None = None
 sensor_detections = {"1": False, "2": False}
+detection_counts = {"1": 0, "2": 0}
 admin_tokens: dict[str, float] = {}
 history: list[dict[str, str | int]] = []
 history_event_id = 0
@@ -152,6 +153,10 @@ def state_snapshot() -> dict[str, object]:
         "semaphores": {key: value.value for key, value in semaphore_state.items()},
         "timing": {"all_red_seconds": ALL_RED_SECONDS},
         "remaining_seconds": remaining_seconds,
+        "statistics": {
+            "total_detections": sum(detection_counts.values()),
+            "by_semaphore": detection_counts.copy(),
+        },
     }
 
 
@@ -367,6 +372,9 @@ def report_sensors(
         "1": report.semaphore1_detected,
         "2": report.semaphore2_detected,
     }
+    for semaphore_id, detected in updated_detections.items():
+        if detected and not sensor_detections[semaphore_id]:
+            detection_counts[semaphore_id] += 1
     if updated_detections != sensor_detections:
         detected_ids = [
             f"vía {key}" for key, detected in updated_detections.items() if detected

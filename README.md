@@ -22,9 +22,12 @@ uvicorn app:app --host 0.0.0.0 --port $PORT
 - `PUT /api/timing` ajusta `all_red_seconds` de 1 a 60, solo en modo manual y
   con sesión de administrador.
 - `GET /api/state` incluye el tiempo restante de la fase automática.
+- `GET /api/state` incluye el total de detecciones desde el último reinicio y su
+  distribución por semáforo.
 - `GET /api/history` devuelve hasta 100 eventos recientes.
 - `POST /api/device/sensors` recibe las detecciones del ESP32 y requiere
   `X-Device-Token`.
 
-El estado y el historial se mantienen en memoria y se reinician al reiniciar el
-servicio. Esta maqueta no debe usarse para controlar tráfico real.
+El estado, las estadísticas y el historial se mantienen en memoria y se
+reinician al reiniciar el servicio. Esta maqueta no debe usarse para controlar
+tráfico real.
