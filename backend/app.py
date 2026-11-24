@@ -2,17 +2,22 @@ import os
 import secrets
 from enum import Enum
 from hmac import compare_digest
+from math import ceil
 from time import monotonic
+from datetime import datetime, timezone
 from typing import Literal
 
 from fastapi import FastAPI, Header, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 Mode = Literal["manual", "automatic"]
 GREEN_SECONDS = 4
 YELLOW_SECONDS = 1
 ALL_RED_SECONDS = 1
+MIN_ALL_RED_SECONDS = 1
+MAX_ALL_RED_SECONDS = 60
+MAX_HISTORY_EVENTS = 100
 ADMIN_TOKEN_TTL_SECONDS = 12 * 60 * 60
 
 
@@ -28,6 +33,10 @@ class ColorUpdate(BaseModel):
 
 class ModeUpdate(BaseModel):
     mode: Mode
+
+
+class TimingUpdate(BaseModel):
+    all_red_seconds: int = Field(ge=MIN_ALL_RED_SECONDS, le=MAX_ALL_RED_SECONDS)
 
 
 class AdminLogin(BaseModel):
@@ -62,6 +71,24 @@ phase_started_at = monotonic()
 last_green: str | None = None
 sensor_detections = {"1": False, "2": False}
 admin_tokens: dict[str, float] = {}
+history: list[dict[str, str | int]] = []
+history_event_id = 0
+
+
+def add_history_event(category: str, message: str) -> None:
+    global history_event_id
+
+    history_event_id += 1
+    history.append(
+        {
+            "id": history_event_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "category": category,
+            "message": message,
+        }
+    )
+    if len(history) > MAX_HISTORY_EVENTS:
+        del history[:-MAX_HISTORY_EVENTS]
 
 
 def require_admin_token(authorization: str | None) -> None:
@@ -96,11 +123,35 @@ def require_device_token(token: str | None) -> None:
 
 
 def state_snapshot() -> dict[str, object]:
+    remaining_seconds: int | None = None
+    if operating_mode == "automatic":
+        duration: int | None
+        if phase == "all_red":
+            duration = ALL_RED_SECONDS
+        elif phase.startswith(("ready_", "yellow_")):
+            duration = YELLOW_SECONDS
+        elif phase.startswith("green_"):
+            semaphore_id = phase[-1]
+            other_id = "2" if semaphore_id == "1" else "1"
+            if sensor_detections[semaphore_id] and not sensor_detections[other_id]:
+                duration = None
+            else:
+                duration = GREEN_SECONDS
+        else:
+            duration = None
+
+        if duration is not None:
+            remaining_seconds = max(
+                0, ceil(duration - (monotonic() - phase_started_at))
+            )
+
     return {
         "mode": operating_mode,
         "phase": phase,
         "detected": sensor_detections.copy(),
         "semaphores": {key: value.value for key, value in semaphore_state.items()},
+        "timing": {"all_red_seconds": ALL_RED_SECONDS},
+        "remaining_seconds": remaining_seconds,
     }
 
 
@@ -111,6 +162,7 @@ def begin_green(semaphore_id: str, started_at: float) -> None:
     other_id = "2" if semaphore_id == "1" else "1"
     semaphore_state[semaphore_id] = Color.green
     semaphore_state[other_id] = Color.red
+    add_history_event("automatic", f"Semáforo {semaphore_id}: verde")
 
 
 def begin_ready(semaphore_id: str, started_at: float) -> None:
@@ -120,6 +172,7 @@ def begin_ready(semaphore_id: str, started_at: float) -> None:
     other_id = "2" if semaphore_id == "1" else "1"
     semaphore_state[semaphore_id] = Color.yellow
     semaphore_state[other_id] = Color.red
+    add_history_event("automatic", f"Semáforo {semaphore_id}: amarillo")
 
 
 def next_green() -> str:
@@ -151,6 +204,7 @@ def advance_automatic(now: float) -> None:
                 phase_started_at = now
                 semaphore_state["1"] = Color.red
                 semaphore_state["2"] = Color.red
+                add_history_event("automatic", "Ambos semáforos en rojo")
             else:
                 begin_green(semaphore_id, now)
         return
@@ -165,6 +219,7 @@ def advance_automatic(now: float) -> None:
             phase_started_at = now
             semaphore_state[semaphore_id] = Color.yellow
             semaphore_state[other_id] = Color.red
+            add_history_event("automatic", f"Semáforo {semaphore_id}: amarillo")
         return
 
     if phase.startswith("yellow_") and elapsed >= YELLOW_SECONDS:
@@ -173,11 +228,17 @@ def advance_automatic(now: float) -> None:
         phase_started_at = now
         semaphore_state["1"] = Color.red
         semaphore_state["2"] = Color.red
+        add_history_event("automatic", "Ambos semáforos en rojo")
 
 
 @app.get("/api/state")
 def read_state() -> dict[str, object]:
     return state_snapshot()
+
+
+@app.get("/api/history")
+def read_history() -> list[dict[str, str | int]]:
+    return list(reversed(history))
 
 
 @app.post("/api/admin/login")
@@ -224,8 +285,32 @@ def update_mode(
         last_green = None
         semaphore_state["1"] = Color.red
         semaphore_state["2"] = Color.red
+        add_history_event("automatic", "Modo automático: ambos semáforos en rojo")
     else:
         phase = "manual"
+        add_history_event("mode", "Modo manual activado")
+    return state_snapshot()
+
+
+@app.put("/api/timing")
+def update_timing(
+    update: TimingUpdate,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    global ALL_RED_SECONDS
+
+    require_admin_token(authorization)
+    if operating_mode != "manual":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cambia a modo manual para ajustar el tiempo de rojo",
+        )
+    if update.all_red_seconds != ALL_RED_SECONDS:
+        ALL_RED_SECONDS = update.all_red_seconds
+        add_history_event(
+            "settings",
+            f"Pausa con ambos en rojo: {ALL_RED_SECONDS} s",
+        )
     return state_snapshot()
 
 
@@ -255,7 +340,11 @@ def update_semaphore(
                 f"el semáforo {semaphore_id} en {update.color.value}"
             ),
         )
-    semaphore_state[semaphore_id] = update.color
+    if semaphore_state[semaphore_id] != update.color:
+        semaphore_state[semaphore_id] = update.color
+        add_history_event(
+            "manual", f"Semáforo {semaphore_id}: {update.color.value}"
+        )
     return {"id": semaphore_id, "color": update.color.value}
 
 
@@ -274,10 +363,21 @@ def report_sensors(
 ) -> dict[str, object]:
     global sensor_detections
     require_device_token(x_device_token)
-    sensor_detections = {
+    updated_detections = {
         "1": report.semaphore1_detected,
         "2": report.semaphore2_detected,
     }
+    if updated_detections != sensor_detections:
+        detected_ids = [
+            f"vía {key}" for key, detected in updated_detections.items() if detected
+        ]
+        message = (
+            f"Vehículo detectado en {', '.join(detected_ids)}"
+            if detected_ids
+            else "Sin vehículos detectados"
+        )
+        add_history_event("sensor", message)
+    sensor_detections = updated_detections
     if operating_mode == "automatic":
         advance_automatic(monotonic())
     return state_snapshot()
