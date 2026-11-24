@@ -49,17 +49,23 @@ class SensorReport(BaseModel):
 
 
 app = FastAPI(title="API educativa de semáforos")
-frontend_origins = [
+default_frontend_origins = [
+    "https://semaforos-inteligentes-fr-ix8lner.vercel.app",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+configured_frontend_origins = [
     origin.strip()
-    for origin in os.getenv(
-        "SEMAPHORE_FRONTEND_ORIGINS",
-        "http://localhost:5173,http://127.0.0.1:5173",
-    ).split(",")
+    for origin in os.getenv("SEMAPHORE_FRONTEND_ORIGINS", "").split(",")
     if origin.strip()
 ]
+frontend_origins = list(
+    dict.fromkeys(default_frontend_origins + configured_frontend_origins)
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=frontend_origins,
+    allow_origin_regex=r"^https://semaforos-inteligentes-fr(?:-[a-z0-9-]+)?\.vercel\.app$",
     allow_methods=["GET", "POST", "PUT"],
     allow_headers=["Authorization", "Content-Type", "X-Device-Token"],
 )

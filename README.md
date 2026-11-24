@@ -4,9 +4,10 @@ API FastAPI educativa para la maqueta de dos semáforos.
 
 ## Configuración
 
-Define `SEMAPHORE_ADMIN_PASSWORD`, `SEMAPHORE_DEVICE_TOKEN` y
-`SEMAPHORE_FRONTEND_ORIGINS` como variables de entorno. No guardes contraseñas,
-tokens ni datos de Wi-Fi en el repositorio.
+Define `SEMAPHORE_ADMIN_PASSWORD` y `SEMAPHORE_DEVICE_TOKEN` como variables de
+entorno. El dominio de Vercel del proyecto y las direcciones locales ya están
+permitidos en CORS; usa `SEMAPHORE_FRONTEND_ORIGINS` para permitir otros
+orígenes. No guardes contraseñas, tokens ni datos de Wi-Fi en el repositorio.
 
 Render debe ejecutar desde el directorio `backend`:
 
